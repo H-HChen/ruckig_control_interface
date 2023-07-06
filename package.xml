@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>ruckig_control_interface</name>
+  <version>1.0.0</version>
+  <description>The ruckig control package</description>
+  <maintainer email="annhunter201@gmail.com">H-HChen</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>geometry_msgs</depend>
+  <depend>roscpp</depend>
+  <depend>std_msgs</depend>
+  <depend>tf</depend>
+  <depend>tm_driver</depend>
+  <depend>tm_kinematics</depend>
+  <depend>tm_msgs</depend>
+  <depend>pluginlib</depend>
+  <depend>eigen</depend>
+  <depend>cmake_modules</depend>
+  <depend>sensor_msgs</depend>
+
+</package>
