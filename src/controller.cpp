@@ -3,80 +3,6 @@
 using namespace control_interface;
 
 
-bool CheckJointLimit(double *q)
-{
-    bool valid = true;
-
-    if (abs(q[0]) > 265 * DEG2RAD) {
-        ROS_WARN("[Position] 1st joint position out of limit (270) : %lf", q[0] * RAD2DEG);
-        valid = false;
-    } else if (abs(q[1]) > 175 * DEG2RAD) {
-        ROS_WARN("[Position] 2nd joint position out of limit (180): %lf", q[1] * RAD2DEG);
-        valid = false;
-    } else if (abs(q[2]) > 148 * DEG2RAD) {
-        ROS_WARN("[Position] 3rd joint position out of limit (155): %lf", q[2] * RAD2DEG);
-        valid = false;
-    } else if (abs(q[3]) > 175 * DEG2RAD) {
-        ROS_WARN("[Position] 4th joint position out of limit (180): %lf", q[3] * RAD2DEG);
-        valid = false;
-    } else if (abs(q[4]) > 175 * DEG2RAD) {
-        ROS_WARN("[Position] 5th joint position out of limit (180): %lf", q[4] * RAD2DEG);
-        valid = false;
-    } else if (abs(q[5]) > 265 * DEG2RAD) {
-        ROS_WARN("[Position] 6th joint position out of limit (180): %lf", q[5] * RAD2DEG);
-        valid = false;
-    } else {
-        valid = true;
-    }
-    return valid;
-}
-
-bool GetQfromInverseKinematics(double* CartesianPosition, double *q_inv)
-{
-    Eigen::Matrix < float, 4, 4 > T_;
-    Eigen::AngleAxisf yawAngle(CartesianPosition[5], Eigen::Vector3f::UnitZ());
-    Eigen::AngleAxisf pitchAngle(CartesianPosition[4], Eigen::Vector3f::UnitY());
-    Eigen::AngleAxisf rollAngle(CartesianPosition[3], Eigen::Vector3f::UnitX());
-    Eigen::Quaternion < float > q = yawAngle * pitchAngle * rollAngle;
-    Eigen::Matrix < float, 3, 3 > RotationMatrix = q.matrix();
-    double *T = new double[16];
-
-
-    T_ << 0., 0., 0., CartesianPosition[0],
-        0., 0., 0., CartesianPosition[1],
-        0., 0., 0., CartesianPosition[2],
-        0., 0., 0., 1.;
-
-    T_.block < 3, 3 > (0, 0) = RotationMatrix.block < 3, 3 > (0, 0);
-
-    tm_jacobian::Matrix2DoubleArray(T_, T);
-    int num_sol = tm_kinematics::inverse(T, q_inv);
-
-    delete[] T;
-    return CheckJointLimit(q_inv);
-}
-
-void ruckig_controller::getNextRuckigInput()
-{
-    bool within_limit = true;
-
-    if (std::count(tm_target_p, tm_target_p + 6, 0.0) != 6) {
-        within_limit = GetQfromInverseKinematics(tm_target_p, tm_target_j);
-    }
-    if (within_limit) {
-        for (size_t joint = 0; joint < NUM_DOF; ++joint) {
-            // Target state is the next waypoint
-            ruckig_input.target_position.at(joint) = tm_target_j[joint];
-            ruckig_input.target_velocity.at(joint) = 0.0;
-            ruckig_input.target_acceleration.at(joint) = 0.0;
-        }
-        initializeRuckigState();
-        ROS_INFO("Recieve New Target Point!!");
-    } else {
-        ROS_WARN("Joint position over limit, skip target");
-    }
-}
-
 void ruckig_controller::ruckig_state_manage()
 {
     if (ruckig_activate) {
@@ -102,8 +28,6 @@ void ruckig_controller::ruckig_state_manage()
             vel_srv.request.motion_type = 1;
             vel_srv.request.velocity = cmd_vel;
             vel_client.call(vel_srv);
-            std::fill(&tm_target_j[0], &tm_target_j[0] + 6, 0.0);
-            std::fill(&tm_target_p[0], &tm_target_p[0] + 6, 0.0);
         }
     }
 }
@@ -122,28 +46,58 @@ void ruckig_controller::joint_callback(const sensor_msgs::JointState& joint_msg)
 
 void ruckig_controller::target_joint_callback(const sensor_msgs::JointState& target_joint_msg)
 {
-    ruckig_ptr = std::make_unique < ruckig::Ruckig < ruckig::DynamicDOFs >> (NUM_DOF, ruckig_timestep);
-    for (size_t joint = 0; joint < NUM_DOF; ++joint) {
-        tm_target_j[joint] = target_joint_msg.position.at(joint);
-    }
+    std::vector < double > joint_values(NUM_DOF);
 
-    getNextRuckigInput();
-    ruckig_activate = true;
+    ruckig_ptr = std::make_unique < ruckig::Ruckig < ruckig::DynamicDOFs >> (NUM_DOF, ruckig_timestep);
+    std::copy_n(target_joint_msg.position.begin(), NUM_DOF, joint_values.begin());
+
+    getNextRuckigInput(joint_values);
 }
 
-void ruckig_controller::target_callback(const geometry_msgs::TransformStamped& target_msg)
+void ruckig_controller::target_callback(const geometry_msgs::Pose& target_msg)
 {
-    ruckig_ptr = std::make_unique < ruckig::Ruckig < ruckig::DynamicDOFs >> (NUM_DOF, ruckig_timestep);
-    tm_target_p[0] = target_msg.transform.translation.x;
-    tm_target_p[1] = target_msg.transform.translation.y;
-    tm_target_p[2] = target_msg.transform.translation.z;
-    tf2::Quaternion quat;
-    tf2::fromMsg(target_msg.transform.rotation, quat);
-    tf2::Matrix3x3 mat(quat);
-    mat.getRPY(tm_target_p[3], tm_target_p[4], tm_target_p[5]);
+    std::vector < double > candidate_ik(NUM_DOF, 0.0);
+    std::vector < double > joint_values(NUM_DOF, 0.0);
 
-    getNextRuckigInput();
-    ruckig_activate = true;
+    auto element_wise_dist =
+        [] (auto& source_vec, auto& target_vec)
+    {
+        double dist = 0.0;
+        for (size_t i = 0; i < NUM_DOF; ++i) {
+            dist += abs(source_vec.at(i) - target_vec.at(i));
+        }
+        return dist;
+    };
+
+    double min_dist = 999.0;
+
+    for (int i = 0; i < ik_attemp; i++) {
+        std::copy_n(current_positions.begin(), NUM_DOF, joint_values.begin());
+        kinematic_state->setJointGroupPositions(joint_model_group, joint_values);
+
+        bool found_ik = kinematic_state->setFromIK(joint_model_group, target_msg, ik_timeout);
+
+        if (found_ik) {
+            kinematic_state->copyJointGroupPositions(joint_model_group, joint_values);
+            double current_dist = element_wise_dist(current_positions, joint_values);
+            if (current_dist < min_dist) {
+                min_dist = current_dist;
+                std::copy_n(joint_values.begin(), NUM_DOF, candidate_ik.begin());
+            }
+        }
+    }
+
+    if (std::count(candidate_ik.begin(), candidate_ik.end(), 0.0) != NUM_DOF) {
+        // For debug: print ik value
+        // for (std::size_t i = 0; i < candidate_ik.size(); ++i) {
+        //     ROS_INFO("Joint %ld: %f", i + 1, candidate_ik[i]);
+        // }
+
+        ruckig_ptr = std::make_unique < ruckig::Ruckig < ruckig::DynamicDOFs >> (NUM_DOF, ruckig_timestep);
+        getNextRuckigInput(joint_values);
+    } else {
+        ROS_WARN("Did not find IK solution");
+    }
 }
 
 void ruckig_controller::ruckig_stop()
@@ -152,6 +106,25 @@ void ruckig_controller::ruckig_stop()
     ruckig_input.synchronization = ruckig::Synchronization::None;
     ruckig_input.target_velocity = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     ruckig_input.target_acceleration = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+}
+
+void ruckig_controller::getNextRuckigInput(std::vector < double > joint_input)
+{
+    kinematic_state->setJointGroupPositions(joint_model_group, joint_input);
+
+    if (kinematic_state->satisfiesBounds()) {
+        for (size_t joint = 0; joint < NUM_DOF; ++joint) {
+            // Target state is the next waypoint
+            ruckig_input.target_position.at(joint) = joint_input.at(joint);
+            ruckig_input.target_velocity.at(joint) = 0.0;
+            ruckig_input.target_acceleration.at(joint) = 0.0;
+        }
+        initializeRuckigState();
+        ROS_INFO("Recieve New Target Point!!");
+        ruckig_activate = true;
+    } else {
+        ROS_WARN("Target position over joint limit");
+    }
 }
 
 void ruckig_controller::initializeRuckigState()

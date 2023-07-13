@@ -15,11 +15,12 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   std_msgs
   tf
+  moveit_core
+  moveit_ros_planning_interface
 
   # tm_description
   tm_msgs
   tm_driver
-  tm_kinematics
 )
 find_package(ruckig REQUIRED)
 
@@ -34,7 +35,6 @@ catkin_package(
     std_msgs
     tf
     tm_driver 
-    tm_kinematics
 )
 
 
@@ -45,13 +45,8 @@ include_directories(
 
 add_executable(velocity_controller src/controller.cpp)
 add_dependencies(velocity_controller ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-find_library(TM_LIBRARY
-             NAMES TM_kinematics
-             PATHS ${CATKIN_PACKAGE_LIB_DESTINATION}
-            )
 target_link_libraries(velocity_controller
   ruckig::ruckig
-  ${TM_LIBRARY}
   ${catkin_LIBRARIES}
   ${EIGEN3_INCLUDE_DIRS}
 )
